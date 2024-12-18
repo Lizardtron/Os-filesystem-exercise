@@ -1,0 +1,1 @@
+To run utopia.sh properly we might need to mount a dev per time since there is high chance of id collisions, due to the fact that there are 3 filesystems in a shared file. I haventfound a way to remound them elsewhere yet.
