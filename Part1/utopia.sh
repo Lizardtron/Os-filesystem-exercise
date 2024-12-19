@@ -42,22 +42,6 @@ QCOW2_BACKING_FILE=./cslab_rootfs_2024.raw
 QCOW2_PRIVATE_FILE=./private.qcow2
 SHARED_FS_DIR=./shared
 
-IMAGE_FILE1="/home/debian/utopia/shared/fsdisk1-7c2b425a6.img"
-LOOP_DEVICE1="/dev/loop8"
-MOUNT_POINT1="/home/debian/utopia/shared/file1"
-
-IMAGE_FILE2="/home/debian/utopia/shared/fsdisk2-a0173283d.img"
-LOOP_DEVICE2="/dev/loop7"
-MOUNT_POINT2="/home/debian/utopia/shared/file2"
-
-IMAGE_FILE3="/home/debian/utopia/shared/fsdisk3-982902777.img"
-LOOP_DEVICE3="/dev/loop6"
-MOUNT_POINT3="/home/debian/utopia/shared/file3"
-
-#releasing the loop devices 
-#sudo losetup -d "$LOOP_DEVICE1"
-#sudo losetup -d "$LOOP_DEVICE2"
-#sudo losetup -d "$LOOP_DEVICE3"
 
 . $UTOPIA_CONFIG
 
@@ -128,75 +112,6 @@ fi
 echo "Ensuring shared directory '$SHARED_FS_DIR' exists" 1>&2
 mkdir -p "$SHARED_FS_DIR"
 
-#add disk1
-# Mount the disk
-echo "Setting up loop device for $IMAGE_FILE1..."
-if [ ! -f "$IMAGE_FILE1" ]; then
-    echo "Error: Image file $IMAGE_FILE1 does not exist."
-    exit 1
-fi
-
-sudo losetup "$LOOP_DEVICE1" "$IMAGE_FILE1"
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to set up loop device."
-    exit 1
-fi
-
-echo "Mounting $LOOP_DEVICE1 to $MOUNT_POINT1..."
-sudo mount "$LOOP_DEVICE1" "$MOUNT_POINT1"
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to mount $LOOP_DEVICE1."
-    sudo losetup -d "$LOOP_DEVICE1"
-    exit 1
-fi
-echo "Disk mounted successfully."
-
-#add disk2
-# Mount the disk
-echo "Setting up loop device for $IMAGE_FILE2..."
-if [ ! -f "$IMAGE_FILE2" ]; then
-    echo "Error: Image file $IMAGE_FILE2 does not exist."
-    exit 1
-fi
-
-sudo losetup "$LOOP_DEVICE2" "$IMAGE_FILE2"
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to set up loop device."
-    exit 1
-fi
-
-echo "Mounting $LOOP_DEVICE2 to $MOUNT_POINT2..."
-sudo mount "$LOOP_DEVICE2" "$MOUNT_POINT2"
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to mount $LOOP_DEVICE2."
-    sudo losetup -d "$LOOP_DEVICE2"
-    exit 1
-fi
-echo "Disk mounted successfully."
-
-#add disk3
-# Mount the disk
-echo "Setting up loop device for $IMAGE_FILE3..."
-if [ ! -f "$IMAGE_FILE3" ]; then
-    echo "Error: Image file $IMAGE_FILE3 does not exist."
-    exit 1
-fi
-
-sudo losetup "$LOOP_DEVICE3" "$IMAGE_FILE3"
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to set up loop device."
-    exit 1
-fi
-
-echo "Mounting $LOOP_DEVICE3 to $MOUNT_POINT3..."
-sudo mount "$LOOP_DEVICE3" "$MOUNT_POINT3"
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to mount $LOOP_DEVICE3."
-    sudo losetup -d "$LOOP_DEVICE3"
-    exit 1
-fi
-echo "Disk mounted successfully."
-
 
 echo " "
 echo " $PF Starting your Virtual Machine ..."
@@ -211,6 +126,7 @@ echo "To connect with vncviewer: vncviewer localhost:0" 1>&2
 # over TCP to lunix.cslab.ece.ntua.gr:49152.
 exec $QEMU -enable-kvm -M pc -m $UTOPIA_MEMORY_MB \
     -smp 2 -drive file=$QCOW2_PRIVATE_FILE,if=virtio \
+    -drive file=/home/debian/utopia/shared/fsdisk1-7c2b425a6.img,if=virtio\
     -net nic -net user,hostfwd=tcp:$UTOPIA_SSH_INTERFACE:$UTOPIA_SSH_PORT-:22 \
     -vnc 127.0.0.1:0 \
     -nographic -monitor /dev/null  \
@@ -224,4 +140,3 @@ exec $QEMU -enable-kvm -M pc -m $UTOPIA_MEMORY_MB \
     #-device virtio-9p-pci,fsdev=exp1,mount_tag=v_tmp \
     #-chardev pty,id=charserial0 \
     #-device isa-serial,chardev=charserial0,id=serial0 \
-
