@@ -1,0 +1,330 @@
+
+342 struct ext2_dir_entry_2 *ext2_find_entry (struct inode *dir,
+343                         const struct qstr *child, struct folio **foliop)
+344 {
+345         const char *name = child->name;
+346         int namelen = child->len;
+347         unsigned reclen = EXT2_DIR_REC_LEN(namelen);
+348         unsigned long start, n;
+349         unsigned long npages = dir_pages(dir);
+350         struct ext2_inode_info *ei = EXT2_I(dir);
+351         ext2_dirent * de;
+352
+353         if (npages == 0)
+354                 goto out;
+355
+356         start = ei->i_dir_start_lookup;
+357         if (start >= npages)
+358                 start = 0;
+359         n = start;
+360         do {
+361                 char *kaddr = ext2_get_folio(dir, n, 0, foliop);
+362                 if (IS_ERR(kaddr))
+363                         return ERR_CAST(kaddr);
+364
+365                 de = (ext2_dirent *) kaddr;
+366                 kaddr += ext2_last_byte(dir, n) - reclen;
+367                 while ((char *) de <= kaddr) {
+368                         if (de->rec_len == 0) {
+369                                 ext2_error(dir->i_sb, __func__,
+370                                         "zero-length directory entry");
+371                                 folio_release_kmap(*foliop, de);
+372                                 goto out;
+373                         }
+374                         if (ext2_match(namelen, name, de))
+375                                 goto found;
+376                         de = ext2_next_entry(de);
+377                 }
+378                 folio_release_kmap(*foliop, kaddr);
+379
+380                 if (++n >= npages)
+381                         n = 0;
+382                 /* next folio is past the blocks we've got */
+383                 if (unlikely(n > (dir->i_blocks >> (PAGE_SHIFT - 9)))) {
+384                         ext2_error(dir->i_sb, __func__,
+385                                 "dir %lu size %lld exceeds block count %llu",
+386                                 dir->i_ino, dir->i_size,
+387                                 (unsigned long long)dir->i_blocks);
+388                         goto out;
+389                 }
+390         } while (n != start);
+391 out:
+392         return ERR_PTR(-ENOENT);
+393
+394 found:
+395         ei->i_dir_start_lookup = n;
+396         return de;
+397 }
+
+1303 static struct ext2_inode *ext2_get_inode(struct super_block *sb, ino_t ino,
+1304                                         struct buffer_head **p)
+1305 {
+1306         struct buffer_head * bh;
+1307         unsigned long block_group;
+1308         unsigned long block;
+1309         unsigned long offset;
+1310         struct ext2_group_desc * gdp;
+1311
+1312         *p = NULL;
+1313         if ((ino != EXT2_ROOT_INO && ino < EXT2_FIRST_INO(sb)) ||
+1314             ino > le32_to_cpu(EXT2_SB(sb)->s_es->s_inodes_count))
+1315                 goto Einval;
+1316
+1317         block_group = (ino - 1) / EXT2_INODES_PER_GROUP(sb);
+1318         gdp = ext2_get_group_desc(sb, block_group, NULL);
+1319         if (!gdp)
+1320                 goto Egdp;
+1321         /*
+1322          * Figure out the offset within the block group inode table
+1323          */
+1324         offset = ((ino - 1) % EXT2_INODES_PER_GROUP(sb)) * EXT2_INODE_SIZE(sb);
+1325         block = le32_to_cpu(gdp->bg_inode_table) +
+1326                 (offset >> EXT2_BLOCK_SIZE_BITS(sb));
+1327         if (!(bh = sb_bread(sb, block)))
+1328                 goto Eio;
+1329
+1330         *p = bh;
+1331         offset &= (EXT2_BLOCK_SIZE(sb) - 1);
+1332         return (struct ext2_inode *) (bh->b_data + offset);
+1333
+1334 Einval:
+1335         ext2_error(sb, "ext2_get_inode", "bad inode number: %lu",
+1336                    (unsigned long) ino);
+1337         return ERR_PTR(-EINVAL);
+1338 Eio:
+1339         ext2_error(sb, "ext2_get_inode",
+1340                    "unable to read inode block - inode=%lu, block=%lu",
+1341                    (unsigned long) ino, block);
+1342 Egdp:
+1343         return ERR_PTR(-EIO);
+1344 }
+
+
+1376 struct inode *ext2_iget (struct super_block *sb, unsigned long ino)
+1377 {
+1378         struct ext2_inode_info *ei;
+1379         struct buffer_head * bh = NULL;
+1380         struct ext2_inode *raw_inode;
+1381         struct inode *inode;
+1382         long ret = -EIO;
+1383         int n;
+1384         uid_t i_uid;
+1385         gid_t i_gid;
+1386
+1387         inode = iget_locked(sb, ino);
+1388         if (!inode)
+1389                 return ERR_PTR(-ENOMEM);
+1390         if (!(inode->i_state & I_NEW))
+1391                 return inode;
+1392
+1393         ei = EXT2_I(inode);
+1394         ei->i_block_alloc_info = NULL;
+1395
+1396         raw_inode = ext2_get_inode(inode->i_sb, ino, &bh);
+1397         if (IS_ERR(raw_inode)) {
+1398                 ret = PTR_ERR(raw_inode);
+1399                 goto bad_inode;
+1400         }
+1401
+1402         inode->i_mode = le16_to_cpu(raw_inode->i_mode);
+1403         i_uid = (uid_t)le16_to_cpu(raw_inode->i_uid_low);
+1404         i_gid = (gid_t)le16_to_cpu(raw_inode->i_gid_low);
+1405         if (!(test_opt (inode->i_sb, NO_UID32))) {
+1406                 i_uid |= le16_to_cpu(raw_inode->i_uid_high) << 16;
+1407                 i_gid |= le16_to_cpu(raw_inode->i_gid_high) << 16;
+1408         }
+1409         i_uid_write(inode, i_uid);
+1410         i_gid_write(inode, i_gid);
+1411         set_nlink(inode, le16_to_cpu(raw_inode->i_links_count));
+1412         inode->i_size = le32_to_cpu(raw_inode->i_size);
+1413         inode_set_atime(inode, (signed)le32_to_cpu(raw_inode->i_atime), 0);
+1414         inode_set_ctime(inode, (signed)le32_to_cpu(raw_inode->i_ctime), 0);
+1415         inode_set_mtime(inode, (signed)le32_to_cpu(raw_inode->i_mtime), 0);
+1416         ei->i_dtime = le32_to_cpu(raw_inode->i_dtime);
+1417         /* We now have enough fields to check if the inode was active or not.
+1418          * This is needed because nfsd might try to access dead inodes
+1419          * the test is that same one that e2fsck uses
+1420          * NeilBrown 1999oct15
+1421          */
+1422         if (inode->i_nlink == 0 && (inode->i_mode == 0 || ei->i_dtime)) {
+1423                 /* this inode is deleted */
+1424                 ret = -ESTALE;
+1425                 goto bad_inode;
+1426         }
+1427         inode->i_blocks = le32_to_cpu(raw_inode->i_blocks);
+1428         ei->i_flags = le32_to_cpu(raw_inode->i_flags);
+1429         ext2_set_inode_flags(inode);
+1430         ei->i_faddr = le32_to_cpu(raw_inode->i_faddr);
+1431         ei->i_frag_no = raw_inode->i_frag;
+1432         ei->i_frag_size = raw_inode->i_fsize;
+1433         ei->i_file_acl = le32_to_cpu(raw_inode->i_file_acl);
+1434         ei->i_dir_acl = 0;
+1435
+1436         if (ei->i_file_acl &&
+1437             !ext2_data_block_valid(EXT2_SB(sb), ei->i_file_acl, 1)) {
+1438                 ext2_error(sb, "ext2_iget", "bad extended attribute block %u",
+1439                            ei->i_file_acl);
+1440                 ret = -EFSCORRUPTED;
+1441                 goto bad_inode;
+1442         }
+1443
+1444         if (S_ISREG(inode->i_mode))
+1445                 inode->i_size |= ((__u64)le32_to_cpu(raw_inode->i_size_high)) << 32;
+1446         else
+1447                 ei->i_dir_acl = le32_to_cpu(raw_inode->i_dir_acl);
+1448         if (i_size_read(inode) < 0) {
+1449                 ret = -EFSCORRUPTED;
+1450                 goto bad_inode;
+1451         }
+1452         ei->i_dtime = 0;
+1453         inode->i_generation = le32_to_cpu(raw_inode->i_generation);
+1454         ei->i_state = 0;
+1455         ei->i_block_group = (ino - 1) / EXT2_INODES_PER_GROUP(inode->i_sb);
+1456         ei->i_dir_start_lookup = 0;
+1457
+1458         /*
+1459          * NOTE! The in-memory inode i_data array is in little-endian order
+1460          * even on big-endian machines: we do NOT byteswap the block numbers!
+1461          */
+1462         for (n = 0; n < EXT2_N_BLOCKS; n++)
+1463                 ei->i_data[n] = raw_inode->i_block[n];
+1464
+1465         if (S_ISREG(inode->i_mode)) {
+1466                 ext2_set_file_ops(inode);
+1467         } else if (S_ISDIR(inode->i_mode)) {
+1468                 inode->i_op = &ext2_dir_inode_operations;
+1469                 inode->i_fop = &ext2_dir_operations;
+1470                 inode->i_mapping->a_ops = &ext2_aops;
+1471         } else if (S_ISLNK(inode->i_mode)) {
+1472                 if (ext2_inode_is_fast_symlink(inode)) {
+1473                         inode->i_link = (char *)ei->i_data;
+1474                         inode->i_op = &ext2_fast_symlink_inode_operations;
+1475                         nd_terminate_link(ei->i_data, inode->i_size,
+1476                                 sizeof(ei->i_data) - 1);
+1477                 } else {
+1478                         inode->i_op = &ext2_symlink_inode_operations;
+1479                         inode_nohighmem(inode);
+1480                         inode->i_mapping->a_ops = &ext2_aops;
+1481                 }
+1482         } else {
+1483                 inode->i_op = &ext2_special_inode_operations;
+1484                 if (raw_inode->i_block[0])
+1485                         init_special_inode(inode, inode->i_mode,
+1486                            old_decode_dev(le32_to_cpu(raw_inode->i_block[0])));
+1487                 else
+1488                         init_special_inode(inode, inode->i_mode,
+1489                            new_decode_dev(le32_to_cpu(raw_inode->i_block[1])));
+1490         }
+1491         brelse (bh);
+1492         unlock_new_inode(inode);
+1493         return inode;
+1494
+1495 bad_inode:
+1496         brelse(bh);
+1497         iget_failed(inode);
+1498         return ERR_PTR(ret);
+1499 }
+
+71 static int ext2_valid_block_bitmap(struct super_block *sb,
+ 72                                         struct ext2_group_desc *desc,
+ 73                                         unsigned int block_group,
+ 74                                         struct buffer_head *bh)
+ 75 {
+ 76         ext2_grpblk_t offset;
+ 77         ext2_grpblk_t next_zero_bit;
+ 78         ext2_fsblk_t bitmap_blk;
+ 79         ext2_fsblk_t group_first_block;
+ 80         ext2_grpblk_t max_bit;
+ 81
+ 82         group_first_block = ext2_group_first_block_no(sb, block_group);
+ 83         max_bit = ext2_group_last_block_no(sb, block_group) - group_first_block;
+ 84
+ 85         /* check whether block bitmap block number is set */
+ 86         bitmap_blk = le32_to_cpu(desc->bg_block_bitmap);
+ 87         offset = bitmap_blk - group_first_block;
+ 88         if (offset < 0 || offset > max_bit ||
+ 89             !ext2_test_bit(offset, bh->b_data))
+ 90                 /* bad block bitmap */
+ 91                 goto err_out;
+ 92
+ 93         /* check whether the inode bitmap block number is set */
+ 94         bitmap_blk = le32_to_cpu(desc->bg_inode_bitmap);
+ 95         offset = bitmap_blk - group_first_block;
+ 96         if (offset < 0 || offset > max_bit ||
+ 97             !ext2_test_bit(offset, bh->b_data))
+ 98                 /* bad block bitmap */
+ 99                 goto err_out;
+100
+101         /* check whether the inode table block number is set */
+102         bitmap_blk = le32_to_cpu(desc->bg_inode_table);
+103         offset = bitmap_blk - group_first_block;
+104         if (offset < 0 || offset > max_bit ||
+105             offset + EXT2_SB(sb)->s_itb_per_group - 1 > max_bit)
+106                 goto err_out;
+107         next_zero_bit = ext2_find_next_zero_bit(bh->b_data,
+108                                 offset + EXT2_SB(sb)->s_itb_per_group,
+109                                 offset);
+110         if (next_zero_bit >= offset + EXT2_SB(sb)->s_itb_per_group)
+111                 /* good bitmap for inode tables */
+112                 return 1;
+113
+114 err_out:
+115         ext2_error(sb, __func__,
+116                         "Invalid block bitmap - "
+117                         "block_group = %d, block = %lu",
+118                         block_group, bitmap_blk);
+119         return 0;
+120 }
+
+582 static ext2_grpblk_t
+583 bitmap_search_next_usable_block(ext2_grpblk_t start, struct buffer_head *bh,
+584                                         ext2_grpblk_t maxblocks)
+585 {
+586         ext2_grpblk_t next;
+587
+588         next = ext2_find_next_zero_bit(bh->b_data, maxblocks, start);
+589         if (next >= maxblocks)
+590                 return -1;
+591         return next;
+592 }
+
+606 static ext2_grpblk_t
+607 find_next_usable_block(int start, struct buffer_head *bh, int maxblocks)
+608 {
+609         ext2_grpblk_t here, next;
+610         char *p, *r;
+611
+612         if (start > 0) {
+613                 /*
+614                  * The goal was occupied; search forward for a free
+615                  * block within the next XX blocks.
+616                  *
+617                  * end_goal is more or less random, but it has to be
+618                  * less than EXT2_BLOCKS_PER_GROUP. Aligning up to the
+619                  * next 64-bit boundary is simple..
+620                  */
+621                 ext2_grpblk_t end_goal = (start + 63) & ~63;
+622                 if (end_goal > maxblocks)
+623                         end_goal = maxblocks;
+624                 here = ext2_find_next_zero_bit(bh->b_data, end_goal, start);
+625                 if (here < end_goal)
+626                         return here;
+627                 ext2_debug("Bit not found near goal\n");
+628         }
+629
+630         here = start;
+631         if (here < 0)
+632                 here = 0;
+633
+634         p = ((char *)bh->b_data) + (here >> 3);
+635         r = memscan(p, 0, ((maxblocks + 7) >> 3) - (here >> 3));
+636         next = (r - ((char *)bh->b_data)) << 3;
+637
+638         if (next < maxblocks && next >= here)
+639                 return next;
+640
+641         here = bitmap_search_next_usable_block(here, bh, maxblocks);
+642         return here;
+643 }
+
+
